@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import * as XLSX from "xlsx";
 
 const API = `http://${window.location.hostname}:4000/api/v1`;
 const socket = io(`http://${window.location.hostname}:4000`);
@@ -7,7 +8,7 @@ const socket = io(`http://${window.location.hostname}:4000`);
 interface PartItem {
   part_number: string;
   description: string;
-  default_pack_qty: number;
+  default_pack_qty?: number;
 }
 
 interface ScanLine {
@@ -38,6 +39,55 @@ interface DockBundle {
   consolidated: ConsolidatedLine[];
 }
 
+function extractMaterialAndDescription(rows: any[][]): PartItem[] {
+  if (!rows || rows.length === 0) return [];
+
+  let headerRowIdx = -1;
+  let matCol = -1;
+  let descCol = -1;
+
+  for (let r = 0; r < Math.min(rows.length, 10); r++) {
+    const normalized = rows[r].map((cell) => String(cell || "").trim().toLowerCase());
+    const foundMat = normalized.findIndex(
+      (h) => h === "material" || h === "part number" || h === "part_number" || h === "material code" || h === "part code"
+    );
+    const foundDesc = normalized.findIndex(
+      (h) => h === "material description" || h === "description" || h === "part description"
+    );
+
+    if (foundMat !== -1 && foundDesc !== -1) {
+      headerRowIdx = r;
+      matCol = foundMat;
+      descCol = foundDesc;
+      break;
+    }
+  }
+
+  // Fallback if header row wasn't included in pasted rows:
+  // Supports both 17-col SAP rows (Col 0 = Material, Col 3 = Material Description) and 2-col rows (Col 0, Col 1)
+  const startRow = headerRowIdx !== -1 ? headerRowIdx + 1 : 0;
+  if (matCol === -1 || descCol === -1) {
+    matCol = 0;
+    const sampleCols = rows[0]?.length || 0;
+    descCol = sampleCols >= 4 ? 3 : 1;
+  }
+
+  const uniqueMap = new Map<string, string>();
+  for (let i = startRow; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    const mat = String(row[matCol] || "").trim().toUpperCase();
+    const desc = String(row[descCol] || "").trim();
+    if (!mat || !desc || mat === "MATERIAL") continue;
+    uniqueMap.set(mat, desc);
+  }
+
+  return Array.from(uniqueMap.entries()).map(([part_number, description]) => ({
+    part_number,
+    description,
+  }));
+}
+
 export default function App() {
   const [tab, setTab] = useState<"STAGING" | "LOADING" | "PARTS" | "HISTORY">("STAGING");
   const [docksOverview, setDocksOverview] = useState<any[]>([]);
@@ -57,8 +107,11 @@ export default function App() {
   const [truckInput, setTruckInput] = useState<string>("");
 
   const [allParts, setAllParts] = useState<PartItem[]>([]);
-  const [csvText, setCsvText] = useState<string>("");
+  const [pasteText, setPasteText] = useState<string>("");
+  const [parsedPreview, setParsedPreview] = useState<PartItem[]>([]);
+  const [importFileName, setImportFileName] = useState<string>("");
   const [importMode, setImportMode] = useState<"MERGE" | "REPLACE">("MERGE");
+  const [isImporting, setIsImporting] = useState<boolean>(false);
   const [historyRows, setHistoryRows] = useState<any[]>([]);
 
   const partInputRef = useRef<HTMLInputElement>(null);
@@ -280,21 +333,52 @@ export default function App() {
     }
   };
 
-  const handleCsvImport = async () => {
-    const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
-    const parsed = lines.map((line) => {
-      const [part_number, description, default_pack_qty] = line.split(",").map((s) => s.trim());
-      return { part_number, description, default_pack_qty: Number(default_pack_qty) || 1 };
-    });
-    const res = await fetch(`${API}/parts/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ parts: parsed, mode: importMode }),
-    });
-    if (res.ok) {
-      alert("Part Master updated successfully!");
-      setCsvText("");
+  const handleExcelFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportFileName(file.name);
+    setPasteText("");
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const data = new Uint8Array(evt.target?.result as ArrayBuffer);
+      const workbook = XLSX.read(data, { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<any[]>(firstSheet, { header: 1 });
+      const extracted = extractMaterialAndDescription(rows);
+      setParsedPreview(extracted);
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handlePasteChange = (val: string) => {
+    setPasteText(val);
+    setImportFileName("");
+    const lines = val.split(/\r?\n/).filter((l) => l.trim());
+    const rows = lines.map((line) => (line.includes("\t") ? line.split("\t") : line.split(",")));
+    setParsedPreview(extractMaterialAndDescription(rows));
+  };
+
+  const handleConfirmImport = async () => {
+    if (parsedPreview.length === 0) return;
+    setIsImporting(true);
+    try {
+      const res = await fetch(`${API}/parts/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parts: parsedPreview, mode: importMode }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Import failed");
+      alert(`Successfully imported ${data.importedCount} unique Material + Description records!`);
+      setParsedPreview([]);
+      setPasteText("");
+      setImportFileName("");
       loadPartsList();
+    } catch (err: any) {
+      alert("Import Error: " + err.message);
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -417,7 +501,6 @@ export default function App() {
                               <div className="mono">{pm.part_number}</div>
                               <div style={{ fontSize: 12, color: "var(--muted)" }}>{pm.description}</div>
                             </div>
-                            <span style={{ fontSize: 11, fontWeight: 700 }}>Pack: {pm.default_pack_qty}</span>
                           </div>
                         ))}
                       </div>
@@ -515,7 +598,6 @@ export default function App() {
                       style={{ height: 34, padding: "0 12px", fontSize: 12 }}
                       disabled={consolidatedList.length === 0}
                       onClick={() => copyAlignedColumn(consolidatedList.map((c) => c.part_number), "PARTS")}
-                      title="Copy cumulative unique Part Numbers (one per line) for SAP Multiple Selection"
                     >
                       {copiedField === "PARTS" ? `✓ Copied ${consolidatedList.length} Parts` : "Copy Parts"}
                     </button>
@@ -525,7 +607,6 @@ export default function App() {
                       style={{ height: 34, padding: "0 12px", fontSize: 12 }}
                       disabled={consolidatedList.length === 0}
                       onClick={() => copyAlignedColumn(consolidatedList.map((c) => c.total_quantity), "QTYS")}
-                      title="Copy cumulative Consolidated Quantities (one per line, aligned with Parts)"
                     >
                       {copiedField === "QTYS" ? `✓ Copied ${consolidatedList.length} Qtys` : "Copy Qtys"}
                     </button>
@@ -583,39 +664,83 @@ export default function App() {
         {tab === "PARTS" && (
           <div className="split-panes">
             <div className="card">
-              <h3>Bulk Import Part Master (CSV Format)</h3>
-              <p style={{ fontSize: 13, color: "var(--muted)" }}>
-                Paste rows formatted as: <code>PART_NUMBER, DESCRIPTION, PACK_QTY</code>
+              <h3 style={{ marginTop: 0 }}>SAP Material Master Import</h3>
+              <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 12 }}>
+                Upload your SAP Excel/CSV sheet (<code>.xlsx</code>, <code>.xls</code>, <code>.csv</code>) or paste rows directly from Excel. Only <b>Material</b> and <b>Material Description</b> are extracted.
               </p>
+
+              <div style={{ marginBottom: 12, padding: 12, background: "#f8fafc", border: "1.5px dashed var(--border)", borderRadius: 8 }}>
+                <label>Option A: Upload SAP Sheet (.xlsx / .xls / .csv)</label>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv,.tsv,.txt"
+                  onChange={handleExcelFileUpload}
+                  style={{ padding: "8px 10px", height: "auto" }}
+                />
+                {importFileName && (
+                  <div style={{ fontSize: 12, color: "var(--green-dark)", fontWeight: 700, marginTop: 6 }}>
+                    Loaded file: {importFileName}
+                  </div>
+                )}
+              </div>
+
+              <label>Option B: Paste Directly from Excel / SAP Export</label>
               <textarea
-                rows={10}
-                style={{ width: "100%", padding: 10, borderRadius: 8, border: "1.5px solid var(--border)", fontFamily: "monospace" }}
-                placeholder={"ATH-NEW-001, Front Mudguard Assembly, 4\nATH-NEW-002, Rear Shock Absorber, 2"}
-                value={csvText}
-                onChange={(e) => setCsvText(e.target.value)}
+                rows={5}
+                style={{ width: "100%", padding: 10, borderRadius: 8, border: "1.5px solid var(--border)", fontFamily: "monospace", fontSize: 12 }}
+                placeholder={"Material\tPlant\tValuation Type\tMaterial Description\n340A0000505D\tW004\t\tSHLDR BOLT HEX SKT HD M8X1.25X32-10.9 PT"}
+                value={pasteText}
+                onChange={(e) => handlePasteChange(e.target.value)}
               />
-              <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+
+              {parsedPreview.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#065f46", marginBottom: 6 }}>
+                    Extracted {parsedPreview.length} unique parts (showing first 5):
+                  </div>
+                  <table>
+                    <thead>
+                      <tr><th>Material (Extracted)</th><th>Material Description (Extracted)</th></tr>
+                    </thead>
+                    <tbody>
+                      {parsedPreview.slice(0, 5).map((item) => (
+                        <tr key={item.part_number}>
+                          <td className="mono">{item.part_number}</td>
+                          <td>{item.description}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
                 <select value={importMode} onChange={(e) => setImportMode(e.target.value as "MERGE" | "REPLACE")} style={{ width: 220 }}>
                   <option value="MERGE">Merge / Update Existing</option>
                   <option value="REPLACE">Replace Entire Catalog</option>
                 </select>
-                <button className="btn btn-green" onClick={handleCsvImport}>Import to Database</button>
+                <button
+                  className="btn btn-green"
+                  disabled={parsedPreview.length === 0 || isImporting}
+                  onClick={handleConfirmImport}
+                >
+                  {isImporting ? "Importing..." : `Import ${parsedPreview.length} Parts to DB`}
+                </button>
               </div>
             </div>
 
             <div className="card">
-              <h3>Active Part Master ({allParts.length} shown)</h3>
+              <h3 style={{ marginTop: 0 }}>Active Part Master ({allParts.length} latest shown)</h3>
               <div className="table-wrap">
                 <table>
                   <thead>
-                    <tr><th>Part Number</th><th>Description</th><th>Default Pack</th></tr>
+                    <tr><th>Material</th><th>Material Description</th></tr>
                   </thead>
                   <tbody>
                     {allParts.map((p) => (
                       <tr key={p.part_number}>
                         <td className="mono">{p.part_number}</td>
                         <td>{p.description}</td>
-                        <td>{p.default_pack_qty}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -627,7 +752,7 @@ export default function App() {
 
         {tab === "HISTORY" && (
           <div className="card">
-            <h3>Completed & Voided Dock Shipments</h3>
+            <h3 style={{ marginTop: 0 }}>Completed & Voided Dock Shipments</h3>
             <table>
               <thead>
                 <tr>
