@@ -1,9 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
-import { io } from "socket.io-client";
 import * as XLSX from "xlsx";
 
 const API = "/api/v1";
-const socket = io();
 
 interface PartItem {
   part_number: string;
@@ -63,8 +61,6 @@ function extractMaterialAndDescription(rows: any[][]): PartItem[] {
     }
   }
 
-  // Fallback if header row wasn't included in pasted rows:
-  // Supports both 17-col SAP rows (Col 0 = Material, Col 3 = Material Description) and 2-col rows (Col 0, Col 1)
   const startRow = headerRowIdx !== -1 ? headerRowIdx + 1 : 0;
   if (matCol === -1 || descCol === -1) {
     matCol = 0;
@@ -116,50 +112,58 @@ export default function App() {
 
   const partInputRef = useRef<HTMLInputElement>(null);
   const qtyInputRef = useRef<HTMLInputElement>(null);
+  const obdInputRef = useRef<HTMLInputElement>(null);
+  const truckInputRef = useRef<HTMLInputElement>(null);
 
   const loadOverview = async () => {
-    const res = await fetch(`${API}/docks/overview`);
-    if (res.ok) setDocksOverview(await res.json());
+    try {
+      const res = await fetch(`${API}/docks/overview`);
+      if (res.ok) setDocksOverview(await res.json());
+    } catch {}
   };
 
   const loadPartsList = async (q = "") => {
-    const res = await fetch(`${API}/parts/search?q=${encodeURIComponent(q)}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (q) setPartMatches(data);
-      else setAllParts(data);
-    }
+    try {
+      const res = await fetch(`${API}/parts/search?q=${encodeURIComponent(q)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (q) setPartMatches(data);
+        else setAllParts(data);
+      }
+    } catch {}
   };
 
   const loadHistory = async () => {
-    const res = await fetch(`${API}/history`);
-    if (res.ok) setHistoryRows(await res.json());
+    try {
+      const res = await fetch(`${API}/history`);
+      if (res.ok) setHistoryRows(await res.json());
+    } catch {}
   };
 
   useEffect(() => {
     loadOverview();
     loadPartsList();
-    socket.on("docks:overview_changed", loadOverview);
-    return () => {
-      socket.off("docks:overview_changed", loadOverview);
-    };
   }, []);
 
   useEffect(() => {
-    if (!selectedDock) return;
-    socket.emit("dock:join", selectedDock);
-
-    const onDockChanged = (updated: DockBundle) => {
-      setBundle(updated);
-      setObdInput(updated.session?.obd_number || "");
-      setTruckInput(updated.session?.truck_number || "");
-    };
-    socket.on("dock:state_changed", onDockChanged);
-
-    return () => {
-      socket.emit("dock:leave", selectedDock);
-      socket.off("dock:state_changed", onDockChanged);
-    };
+    const timer = setInterval(async () => {
+      loadOverview();
+      if (!selectedDock) return;
+      try {
+        const res = await fetch(`${API}/docks/${selectedDock}/active`);
+        if (res.ok) {
+          const updated: DockBundle = await res.json();
+          setBundle(updated);
+          if (document.activeElement !== obdInputRef.current) {
+            setObdInput(updated.session?.obd_number || "");
+          }
+          if (document.activeElement !== truckInputRef.current) {
+            setTruckInput(updated.session?.truck_number || "");
+          }
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(timer);
   }, [selectedDock]);
 
   const copyAlignedColumn = async (values: Array<string | number>, field: "PARTS" | "QTYS") => {
@@ -204,6 +208,7 @@ export default function App() {
       setBundle(data);
       setObdInput(data.session?.obd_number || "");
       setTruckInput(data.session?.truck_number || "");
+      loadOverview();
       if (tab === "STAGING" && data.session?.status === "STAGING") {
         setTimeout(() => partInputRef.current?.focus(), 50);
       }
@@ -298,6 +303,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       setBundle(data);
+      loadOverview();
     } catch (err: any) {
       setErrorMsg(err.message);
     }
@@ -324,6 +330,7 @@ export default function App() {
     if (res.ok) {
       const updated = await res.json();
       setBundle(updated);
+      loadOverview();
       if (action === "COMPLETE" || action === "VOID") {
         setSelectedDock("");
         setDockInputText("");
@@ -455,6 +462,7 @@ export default function App() {
                   <label>SAP OBD Number</label>
                   <div style={{ display: "flex", gap: 6 }}>
                     <input
+                      ref={obdInputRef}
                       value={obdInput}
                       disabled={!session || tab === "LOADING"}
                       onChange={(e) => setObdInput(e.target.value)}
@@ -469,6 +477,7 @@ export default function App() {
                   <label>Truck Number (Editable Both Views)</label>
                   <div style={{ display: "flex", gap: 6 }}>
                     <input
+                      ref={truckInputRef}
                       value={truckInput}
                       disabled={!session}
                       onChange={(e) => setTruckInput(e.target.value)}
