@@ -2,8 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import * as XLSX from "xlsx";
 
-const API = `http://${window.location.hostname}:4000/api/v1`;
-const socket = io(`http://${window.location.hostname}:4000`);
+const API = "/api/v1";
+const socket = io();
 
 interface PartItem {
   part_number: string;
