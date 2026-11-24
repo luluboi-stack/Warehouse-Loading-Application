@@ -1,5 +1,7 @@
 import express from "express";
 import http from "http";
+import path from "path";
+import fs from "fs";
 import cors from "cors";
 import { Server } from "socket.io";
 import dotenv from "dotenv";
@@ -155,7 +157,6 @@ app.post("/api/v1/parts/import", async (req, res) => {
     return res.status(400).json({ error: "No valid Material and Material Description rows found." });
   }
 
-  // Deduplicate by Material code so multi-plant SAP exports never conflict
   const uniqueMap = new Map<string, string>();
   for (const p of parts) {
     const mat = String(p.part_number || "").trim().toUpperCase();
@@ -214,5 +215,16 @@ app.get("/api/v1/history", async (_req, res) => {
   }
 });
 
+const frontendDist = path.resolve(__dirname, "../../frontend/dist");
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" || req.path.startsWith("/api") || req.path.startsWith("/socket.io")) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDist, "index.html"));
+  });
+}
+
 const PORT = process.env.PORT || 4000;
-server.listen(Number(PORT), "0.0.0.0", () => console.log(`Ather Dock Backend running on http://0.0.0.0:${PORT}`));
+server.listen(Number(PORT), "0.0.0.0", () => console.log(`Ather Dock Server running on http://0.0.0.0:${PORT}`));
