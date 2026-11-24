@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "ather_dock.db")
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
-DESIGNATED_DOCKS = [f"DOCK-{i}" for i in range(41, 51)]
+DESIGNATED_DOCKS = [f"DOCK-{i}" for i in range(40, 49) if i != 43]
 
 MIME_OVERRIDES = {
     ".html": "text/html; charset=utf-8",
