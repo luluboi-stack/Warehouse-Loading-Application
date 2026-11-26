@@ -15,6 +15,7 @@ interface ScanLine {
   description: string;
   quantity: number;
   scanned_at: string;
+  entry_method?: "BARCODE_SCAN" | "DROPDOWN_SELECT" | "MANUAL_TYPED" | "LEGACY";
 }
 
 interface ConsolidatedLine {
@@ -30,6 +31,8 @@ interface DockBundle {
     session_id: string;
     dock_number: string;
     status: "STAGING" | "READY_FOR_LOADING" | "KEPT";
+    billing_doc_number: string | null;
+    sto_number: string | null;
     obd_number: string | null;
     truck_number: string | null;
   } | null;
@@ -37,9 +40,53 @@ interface DockBundle {
   consolidated: ConsolidatedLine[];
 }
 
+function formatISTTime(raw?: string | null): string {
+  if (!raw) return "-";
+  const normalized = raw.includes("T") ? raw : raw.replace(" ", "T") + "Z";
+  const d = new Date(normalized);
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }) + " IST";
+}
+
+function formatISTDateTime(raw?: string | null): string {
+  if (!raw) return "-";
+  const normalized = raw.includes("T") ? raw : raw.replace(" ", "T") + "Z";
+  const d = new Date(normalized);
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }) + " IST";
+}
+
+function renderMethodBadge(method?: string) {
+  const m = method || "LEGACY";
+  if (m === "BARCODE_SCAN") {
+    return <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, marginLeft: 6 }}>SCAN</span>;
+  }
+  if (m === "DROPDOWN_SELECT") {
+    return <span style={{ background: "#fef3c7", color: "#92400e", padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, marginLeft: 6 }}>DROPDOWN</span>;
+  }
+  if (m === "MANUAL_TYPED") {
+    return <span style={{ background: "#e2e8f0", color: "#334155", padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, marginLeft: 6 }}>TYPED</span>;
+  }
+  return null;
+}
+
 function extractMaterialAndDescription(rows: any[][]): PartItem[] {
   if (!rows || rows.length === 0) return [];
-
   let headerRowIdx = -1;
   let matCol = -1;
   let descCol = -1;
@@ -52,7 +99,6 @@ function extractMaterialAndDescription(rows: any[][]): PartItem[] {
     const foundDesc = normalized.findIndex(
       (h) => h === "material description" || h === "description" || h === "part description"
     );
-
     if (foundMat !== -1 && foundDesc !== -1) {
       headerRowIdx = r;
       matCol = foundMat;
@@ -85,7 +131,7 @@ function extractMaterialAndDescription(rows: any[][]): PartItem[] {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"STAGING" | "LOADING" | "PARTS" | "HISTORY">("STAGING");
+  const [tab, setTab] = useState<"STAGING" | "LOADING" | "PARTS" | "HISTORY" | "ANALYTICS">("STAGING");
   const [docksOverview, setDocksOverview] = useState<any[]>([]);
   const [selectedDock, setSelectedDock] = useState<string>("");
   const [dockInputText, setDockInputText] = useState<string>("");
@@ -98,7 +144,11 @@ export default function App() {
   const [showDropdown, setShowDropdown] = useState<boolean>(false);
   const [selectedPart, setSelectedPart] = useState<PartItem | null>(null);
   const [qtyInput, setQtyInput] = useState<string>("");
+  const [entryMethod, setEntryMethod] = useState<"BARCODE_SCAN" | "DROPDOWN_SELECT" | "MANUAL_TYPED">("MANUAL_TYPED");
+  const firstKeyTimeRef = useRef<number | null>(null);
 
+  const [billingDocInput, setBillingDocInput] = useState<string>("");
+  const [stoInput, setStoInput] = useState<string>("");
   const [obdInput, setObdInput] = useState<string>("");
   const [truckInput, setTruckInput] = useState<string>("");
 
@@ -109,9 +159,12 @@ export default function App() {
   const [importMode, setImportMode] = useState<"MERGE" | "REPLACE">("MERGE");
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [historyRows, setHistoryRows] = useState<any[]>([]);
+  const [analyticsData, setAnalyticsData] = useState<any>(null);
 
   const partInputRef = useRef<HTMLInputElement>(null);
   const qtyInputRef = useRef<HTMLInputElement>(null);
+  const billingInputRef = useRef<HTMLInputElement>(null);
+  const stoInputRef = useRef<HTMLInputElement>(null);
   const obdInputRef = useRef<HTMLInputElement>(null);
   const truckInputRef = useRef<HTMLInputElement>(null);
 
@@ -140,6 +193,13 @@ export default function App() {
     } catch {}
   };
 
+  const loadAnalytics = async () => {
+    try {
+      const res = await fetch(`${API}/analytics/scans`);
+      if (res.ok) setAnalyticsData(await res.json());
+    } catch {}
+  };
+
   useEffect(() => {
     loadOverview();
     loadPartsList();
@@ -154,6 +214,12 @@ export default function App() {
         if (res.ok) {
           const updated: DockBundle = await res.json();
           setBundle(updated);
+          if (document.activeElement !== billingInputRef.current) {
+            setBillingDocInput(updated.session?.billing_doc_number || "");
+          }
+          if (document.activeElement !== stoInputRef.current) {
+            setStoInput(updated.session?.sto_number || "");
+          }
           if (document.activeElement !== obdInputRef.current) {
             setObdInput(updated.session?.obd_number || "");
           }
@@ -206,6 +272,8 @@ export default function App() {
       setSelectedDock(data.dockNumber);
       setDockInputText(data.dockNumber);
       setBundle(data);
+      setBillingDocInput(data.session?.billing_doc_number || "");
+      setStoInput(data.session?.sto_number || "");
       setObdInput(data.session?.obd_number || "");
       setTruckInput(data.session?.truck_number || "");
       loadOverview();
@@ -218,6 +286,13 @@ export default function App() {
   };
 
   const handlePartInputChange = async (val: string) => {
+    const now = performance.now();
+    if (!partQuery && val.length > 0) {
+      firstKeyTimeRef.current = now;
+    } else if (!val) {
+      firstKeyTimeRef.current = null;
+    }
+
     setPartQuery(val);
     setErrorMsg("");
     const trimmed = val.trim().toUpperCase();
@@ -225,6 +300,7 @@ export default function App() {
       setPartMatches([]);
       setShowDropdown(false);
       setSelectedPart(null);
+      setEntryMethod("MANUAL_TYPED");
       return;
     }
 
@@ -243,14 +319,23 @@ export default function App() {
 
       const exact = matches.find((m) => m.part_number.toUpperCase() === trimmed);
       if (exact) {
-        selectPartForQty(exact);
+        const elapsed = firstKeyTimeRef.current ? now - firstKeyTimeRef.current : 9999;
+        const detectedMethod = trimmed.length >= 4 && elapsed <= 180 ? "BARCODE_SCAN" : "MANUAL_TYPED";
+        setSelectedPart(exact);
+        setPartQuery(exact.part_number);
+        setEntryMethod(detectedMethod);
+        setShowDropdown(false);
+        setErrorMsg("");
+        setQtyInput("");
+        setTimeout(() => qtyInputRef.current?.focus(), 20);
       }
     }
   };
 
-  const selectPartForQty = (part: PartItem) => {
+  const selectPartFromDropdown = (part: PartItem) => {
     setSelectedPart(part);
     setPartQuery(part.part_number);
+    setEntryMethod("DROPDOWN_SELECT");
     setShowDropdown(false);
     setErrorMsg("");
     setQtyInput("");
@@ -261,7 +346,6 @@ export default function App() {
     e.preventDefault();
     if (!bundle?.session) return;
     setErrorMsg("");
-
     const code = (selectedPart?.part_number || partQuery).trim().toUpperCase();
     if (/^\d{8,14}$/.test(code)) {
       setErrorMsg("SU barcode not allowed. Type or select a Part Number from Part Master.");
@@ -274,7 +358,11 @@ export default function App() {
       const res = await fetch(`${API}/sessions/${bundle.session.session_id}/scans`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partNumber: code, quantity: Number(qtyInput) }),
+        body: JSON.stringify({
+          partNumber: code,
+          quantity: Number(qtyInput),
+          entryMethod,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -283,6 +371,8 @@ export default function App() {
       setPartQuery("");
       setSelectedPart(null);
       setQtyInput("");
+      setEntryMethod("MANUAL_TYPED");
+      firstKeyTimeRef.current = null;
       partInputRef.current?.focus();
     } catch (err: any) {
       setErrorMsg(err.message);
@@ -299,6 +389,15 @@ export default function App() {
     if (!bundle?.session) return;
     setErrorMsg("");
     try {
+      await fetch(`${API}/sessions/${bundle.session.session_id}/metadata`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          billingDocNumber: billingDocInput,
+          stoNumber: stoInput,
+          obdNumber: obdInput,
+        }),
+      });
       const res = await fetch(`${API}/sessions/${bundle.session.session_id}/lock`, { method: "PATCH" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -309,15 +408,23 @@ export default function App() {
     }
   };
 
-  const handleSaveMetadata = async (field: "obd" | "truck") => {
+  const handleSaveMetadata = async (field: "billing" | "sto" | "obd" | "truck") => {
     if (!bundle?.session) return;
-    const payload = field === "obd" ? { obdNumber: obdInput } : { truckNumber: truckInput };
+    setErrorMsg("");
+    const payload: any = {};
+    if (field === "billing") payload.billingDocNumber = billingDocInput;
+    if (field === "sto") payload.stoNumber = stoInput;
+    if (field === "obd") payload.obdNumber = obdInput;
+    if (field === "truck") payload.truckNumber = truckInput;
+
     const res = await fetch(`${API}/sessions/${bundle.session.session_id}/metadata`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (res.ok) setBundle(await res.json());
+    const data = await res.json();
+    if (res.ok) setBundle(data);
+    else setErrorMsg(data.error || "Failed to update metadata");
   };
 
   const handleFinalizeLoading = async (action: "COMPLETE" | "KEEP" | "VOID") => {
@@ -334,6 +441,8 @@ export default function App() {
       if (action === "COMPLETE" || action === "VOID") {
         setSelectedDock("");
         setDockInputText("");
+        setBillingDocInput("");
+        setStoInput("");
         setObdInput("");
         setTruckInput("");
       }
@@ -345,15 +454,13 @@ export default function App() {
     if (!file) return;
     setImportFileName(file.name);
     setPasteText("");
-
     const reader = new FileReader();
     reader.onload = (evt) => {
       const data = new Uint8Array(evt.target?.result as ArrayBuffer);
       const workbook = XLSX.read(data, { type: "array" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json<any[]>(firstSheet, { header: 1 });
-      const extracted = extractMaterialAndDescription(rows);
-      setParsedPreview(extracted);
+      setParsedPreview(extractMaterialAndDescription(rows));
     };
     reader.readAsArrayBuffer(file);
   };
@@ -389,10 +496,31 @@ export default function App() {
     }
   };
 
+  const downloadAnalyticsCSV = () => {
+    if (!analyticsData?.recentLogs) return;
+    const header = ["Timestamp (IST)", "Dock", "Part Number", "Material Description", "Quantity", "Entry Method"];
+    const rows = analyticsData.recentLogs.map((r: any) => [
+      formatISTDateTime(r.scanned_at),
+      r.dock_number,
+      r.part_number,
+      `"${String(r.description || "").replace(/"/g, '""')}"`,
+      r.quantity,
+      r.entry_method || "LEGACY",
+    ]);
+    const csv = [header.join(","), ...rows.map((r: any[]) => r.join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ather-scan-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const session = bundle?.session;
   const consolidatedList = bundle?.consolidated || [];
   const isStagingEditable = tab === "STAGING" && session?.status === "STAGING";
-  const isLockedOrReady = session?.status === "READY_FOR_LOADING" || session?.status === "KEPT";
+  const isTruckEditable = tab === "LOADING" && Boolean(session) && session?.status !== "STAGING";
 
   return (
     <div>
@@ -414,6 +542,9 @@ export default function App() {
           <button className={`nav-btn ${tab === "HISTORY" ? "active" : ""}`} onClick={() => { setTab("HISTORY"); loadHistory(); }}>
             Audit History
           </button>
+          <button className={`nav-btn ${tab === "ANALYTICS" ? "active" : ""}`} onClick={() => { setTab("ANALYTICS"); loadAnalytics(); }}>
+            Scan Analytics
+          </button>
         </div>
       </header>
 
@@ -421,9 +552,9 @@ export default function App() {
         {(tab === "STAGING" || tab === "LOADING") && (
           <>
             <div className="card" style={{ marginBottom: 14 }}>
-              <div className="context-grid">
+              <div className="context-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))" }}>
                 <div>
-                  <label>Select / Scan Dock Number (1 Active)</label>
+                  <label>Select / Scan Dock Number</label>
                   <div style={{ display: "flex", gap: 6 }}>
                     <input
                       value={dockInputText}
@@ -447,45 +578,63 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label>Active Dock</label>
-                  <input value={selectedDock || "NONE SELECTED"} disabled />
-                </div>
-
-                <div>
-                  <label>Dock Status</label>
+                  <label>Active Dock & Status</label>
+                  <input value={selectedDock || "NONE SELECTED"} disabled style={{ marginBottom: 6 }} />
                   <div className={`status-pill st-${session?.status || "IDLE"}`}>
                     {session?.status ? session.status.replace(/_/g, " ") : "CLEAN / IDLE"}
                   </div>
                 </div>
 
                 <div>
-                  <label>SAP OBD Number</label>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <input
-                      ref={obdInputRef}
-                      value={obdInput}
-                      disabled={!session || tab === "LOADING"}
-                      onChange={(e) => setObdInput(e.target.value)}
-                      onBlur={() => handleSaveMetadata("obd")}
-                      onKeyDown={(e) => e.key === "Enter" && handleSaveMetadata("obd")}
-                      placeholder={isLockedOrReady ? "Enter SAP OBD #" : "Lock dock first"}
-                    />
-                  </div>
+                  <label>Billing Document # (Staging Only)</label>
+                  <input
+                    ref={billingInputRef}
+                    value={billingDocInput}
+                    disabled={!isStagingEditable}
+                    onChange={(e) => setBillingDocInput(e.target.value)}
+                    onBlur={() => handleSaveMetadata("billing")}
+                    onKeyDown={(e) => e.key === "Enter" && handleSaveMetadata("billing")}
+                    placeholder={isStagingEditable ? "Enter Billing Doc #" : "Locked after staging"}
+                  />
                 </div>
 
                 <div>
-                  <label>Truck Number (Editable Both Views)</label>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <input
-                      ref={truckInputRef}
-                      value={truckInput}
-                      disabled={!session}
-                      onChange={(e) => setTruckInput(e.target.value)}
-                      onBlur={() => handleSaveMetadata("truck")}
-                      onKeyDown={(e) => e.key === "Enter" && handleSaveMetadata("truck")}
-                      placeholder="TN-70-XX-0000"
-                    />
-                  </div>
+                  <label>STO Number (Staging Only)</label>
+                  <input
+                    ref={stoInputRef}
+                    value={stoInput}
+                    disabled={!isStagingEditable}
+                    onChange={(e) => setStoInput(e.target.value)}
+                    onBlur={() => handleSaveMetadata("sto")}
+                    onKeyDown={(e) => e.key === "Enter" && handleSaveMetadata("sto")}
+                    placeholder={isStagingEditable ? "Enter STO #" : "Locked after staging"}
+                  />
+                </div>
+
+                <div>
+                  <label>SAP OBD Number (Staging Only)</label>
+                  <input
+                    ref={obdInputRef}
+                    value={obdInput}
+                    disabled={!isStagingEditable}
+                    onChange={(e) => setObdInput(e.target.value)}
+                    onBlur={() => handleSaveMetadata("obd")}
+                    onKeyDown={(e) => e.key === "Enter" && handleSaveMetadata("obd")}
+                    placeholder={isStagingEditable ? "Enter SAP OBD #" : "Locked after staging"}
+                  />
+                </div>
+
+                <div>
+                  <label>Truck Number (Loading Gate Only)</label>
+                  <input
+                    ref={truckInputRef}
+                    value={truckInput}
+                    disabled={!isTruckEditable}
+                    onChange={(e) => setTruckInput(e.target.value)}
+                    onBlur={() => handleSaveMetadata("truck")}
+                    onKeyDown={(e) => e.key === "Enter" && handleSaveMetadata("truck")}
+                    placeholder={isTruckEditable ? "TN-70-XX-0000" : "Editable at Loading Gate"}
+                  />
                 </div>
               </div>
 
@@ -505,7 +654,7 @@ export default function App() {
                     {showDropdown && (
                       <div className="dropdown-menu">
                         {partMatches.map((pm) => (
-                          <div key={pm.part_number} className="dd-row" onClick={() => selectPartForQty(pm)}>
+                          <div key={pm.part_number} className="dd-row" onClick={() => selectPartFromDropdown(pm)}>
                             <div>
                               <div className="mono">{pm.part_number}</div>
                               <div style={{ fontSize: 12, color: "var(--muted)" }}>{pm.description}</div>
@@ -563,7 +712,7 @@ export default function App() {
                         <th>Part Number</th>
                         <th>Description</th>
                         <th>Qty</th>
-                        <th>Time</th>
+                        <th>Time (IST)</th>
                         {isStagingEditable && <th>Action</th>}
                       </tr>
                     </thead>
@@ -571,10 +720,13 @@ export default function App() {
                       {(bundle?.rawLines || []).map((row, idx) => (
                         <tr key={row.scan_id}>
                           <td>{(bundle?.rawLines.length || 0) - idx}</td>
-                          <td className="mono">{row.part_number}</td>
+                          <td className="mono">
+                            {row.part_number}
+                            {renderMethodBadge(row.entry_method)}
+                          </td>
                           <td>{row.description}</td>
                           <td className="mono">{row.quantity}</td>
-                          <td style={{ color: "var(--muted)" }}>{new Date(row.scanned_at).toLocaleTimeString()}</td>
+                          <td style={{ color: "var(--muted)", fontSize: 12 }}>{formatISTTime(row.scanned_at)}</td>
                           {isStagingEditable && (
                             <td>
                               <button className="btn btn-danger" style={{ height: 28, padding: "0 8px" }} onClick={() => handleDeleteScan(row.scan_id)}>
@@ -762,30 +914,144 @@ export default function App() {
         {tab === "HISTORY" && (
           <div className="card">
             <h3 style={{ marginTop: 0 }}>Completed & Voided Dock Shipments</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>Dock</th>
-                  <th>Status</th>
-                  <th>OBD Number</th>
-                  <th>Truck Number</th>
-                  <th>Total Units</th>
-                  <th>Completed At</th>
-                </tr>
-              </thead>
-              <tbody>
-                {historyRows.map((h) => (
-                  <tr key={h.session_id}>
-                    <td className="mono">{h.dock_number}</td>
-                    <td>{h.status}</td>
-                    <td className="mono">{h.obd_number || "-"}</td>
-                    <td className="mono">{h.truck_number || "-"}</td>
-                    <td className="mono">{h.total_qty}</td>
-                    <td>{h.completed_at ? new Date(h.completed_at).toLocaleString() : "-"}</td>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Dock</th>
+                    <th>Status</th>
+                    <th>Billing Doc #</th>
+                    <th>STO #</th>
+                    <th>OBD #</th>
+                    <th>Truck #</th>
+                    <th>Total Units</th>
+                    <th>Completed At (IST)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {historyRows.map((h) => (
+                    <tr key={h.session_id}>
+                      <td className="mono">{h.dock_number}</td>
+                      <td>{h.status}</td>
+                      <td className="mono">{h.billing_doc_number || "-"}</td>
+                      <td className="mono">{h.sto_number || "-"}</td>
+                      <td className="mono">{h.obd_number || "-"}</td>
+                      <td className="mono">{h.truck_number || "-"}</td>
+                      <td className="mono">{h.total_qty}</td>
+                      <td>{formatISTDateTime(h.completed_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {tab === "ANALYTICS" && (
+          <div>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="pane-header">
+                <div>
+                  <h3 style={{ margin: 0 }}>Barcode Scan vs. Manual Selection Analytics</h3>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                    Identifies SKUs frequently entered via dropdown/typing due to missing or unreadable shopfloor barcode labels.
+                  </div>
+                </div>
+                <button className="btn btn-outline" onClick={downloadAnalyticsCSV}>
+                  Export CSV Log
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12 }}>
+                <div style={{ padding: 12, background: "#f0fdf4", borderRadius: 8, border: "1px solid #bbf7d0" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#166534" }}>BARCODE SCAN RATE</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 800, color: "#14532d" }}>
+                    {analyticsData?.summary?.scanRate ?? 0}%
+                  </div>
+                </div>
+                <div style={{ padding: 12, background: "#f8fafc", borderRadius: 8, border: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>BARCODE SCANS</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 800 }}>
+                    {analyticsData?.summary?.barcodeScans ?? 0}
+                  </div>
+                </div>
+                <div style={{ padding: 12, background: "#fffbeb", borderRadius: 8, border: "1px solid #fde68a" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#92400e" }}>DROPDOWN SELECTED</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 800, color: "#78350f" }}>
+                    {analyticsData?.summary?.dropdownSelects ?? 0}
+                  </div>
+                </div>
+                <div style={{ padding: 12, background: "#f8fafc", borderRadius: 8, border: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>MANUAL TYPED</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 800 }}>
+                    {analyticsData?.summary?.manualTyped ?? 0}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="split-panes">
+              <div className="card">
+                <h4 style={{ marginTop: 0 }}>Parts Requiring Label Check (Sorted by Manual/Dropdown Count)</h4>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Part Number</th>
+                        <th>Description</th>
+                        <th>Barcode Scans</th>
+                        <th>Dropdown / Typed</th>
+                        <th>Manual %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(analyticsData?.byPart || []).map((p: any) => (
+                        <tr key={p.part_number}>
+                          <td className="mono">{p.part_number}</td>
+                          <td>{p.description}</td>
+                          <td className="mono" style={{ color: "#166534" }}>{p.barcode_count}</td>
+                          <td className="mono" style={{ color: p.manual_count > 0 ? "#b45309" : "inherit", fontWeight: 700 }}>
+                            {p.manual_count}
+                          </td>
+                          <td className="mono">{p.manual_pct}%</td>
+                        </tr>
+                      ))}
+                      {(!analyticsData?.byPart || analyticsData.byPart.length === 0) && (
+                        <tr><td colSpan={5} style={{ textAlign: "center", padding: 24, color: "var(--muted)" }}>No scan telemetry recorded yet.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="card">
+                <h4 style={{ marginTop: 0 }}>Recent Entry Method Log (Last 100 Entries)</h4>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Time (IST)</th>
+                        <th>Dock</th>
+                        <th>Part Number</th>
+                        <th>Qty</th>
+                        <th>Method</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(analyticsData?.recentLogs || []).map((r: any) => (
+                        <tr key={r.scan_id}>
+                          <td style={{ fontSize: 12, color: "var(--muted)" }}>{formatISTDateTime(r.scanned_at)}</td>
+                          <td className="mono">{r.dock_number}</td>
+                          <td className="mono">{r.part_number}</td>
+                          <td className="mono">{r.quantity}</td>
+                          <td>{renderMethodBadge(r.entry_method)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </div>
